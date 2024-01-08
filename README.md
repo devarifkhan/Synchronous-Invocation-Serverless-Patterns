@@ -1,0 +1,1 @@
+# Synchronous-Invocation-Serverless-Patterns
