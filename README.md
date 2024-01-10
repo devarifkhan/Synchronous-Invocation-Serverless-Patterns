@@ -1929,3 +1929,1114 @@ python -m pytest tests/integration -v
 ```
 
 ![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/sam-python/integration-test-result.png)
+##  Observe the App
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/cloudwatch-product-diagram.png)
+
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observability#add-observability-resources)
+
+### Add observability resources
+
+Paste the following template into `template.yaml` to add observability:
+
+Expand for SAM template.yaml v6 - Observability
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM Template for Serverless Patterns v6 - Observability
+
+Globals:
+  Function:
+    Runtime: python3.9
+    MemorySize: 128
+    Timeout: 100
+    Tracing: Active
+
+Parameters:
+  UserPoolAdminGroupName:
+    Description: User pool group name for API administrators 
+    Type: String
+    Default: apiAdmins
+
+Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub  ${AWS::StackName}-Users
+      AttributeDefinitions:
+        - AttributeName: userid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/users.lambda_handler
+      Description: Handler for all users related operations
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+      Events:
+        GetUsersEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: get
+            RestApiId: !Ref RestAPI
+        PutUserEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: post
+            RestApiId: !Ref RestAPI
+        UpdateUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: put
+            RestApiId: !Ref RestAPI
+        GetUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: get
+            RestApiId: !Ref RestAPI
+        DeleteUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: delete
+            RestApiId: !Ref RestAPI
+
+  RestAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true
+      Tags:
+        Name: !Sub "${AWS::StackName}-API"
+        Stack: !Sub "${AWS::StackName}"
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - Authorization
+      AccessLogSetting:
+        DestinationArn: !GetAtt AccessLogs.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","routeKey":"$context.routeKey", "status":"$context.status","protocol":"$context.protocol", "integrationStatus": $context.integrationStatus, "integrationLatency": $context.integrationLatency, "responseLength":"$context.responseLength" }'
+      MethodSettings:
+        - ResourcePath: "/*"
+          LoggingLevel: INFO
+          HttpMethod: "*"
+          DataTraceEnabled: True
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties: 
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AdminCreateUserConfig: 
+        AllowAdminCreateUserOnly: false
+      AutoVerifiedAttributes: 
+        - email
+      Schema: 
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      UsernameAttributes: 
+        - email
+      UserPoolTags:
+          Key: Name
+          Value: !Sub ${AWS::StackName} User Pool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties: 
+      ClientName: 
+        !Sub ${AWS::StackName}UserPoolClient
+      ExplicitAuthFlows: 
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders: 
+        - COGNITO
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - 'code'
+      AllowedOAuthScopes:
+        - 'email'
+        - 'openid'
+      CallbackURLs:
+        - 'http://localhost' 
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      Domain: !Ref UserPoolClient
+      UserPoolId: !Ref UserPool
+
+  ApiAdministratorsUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: User group for API Administrators
+      GroupName: !Ref UserPoolAdminGroupName
+      Precedence: 0
+      UserPoolId: !Ref UserPool                 
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/authorizer.lambda_handler
+      Description: Handler for Lambda authorizer
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          APPLICATION_CLIENT_ID: !Ref UserPoolClient
+          ADMIN_GROUP_NAME: !Ref UserPoolAdminGroupName
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+
+  ApiLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccountLoggingSettings:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiLoggingRole.Arn
+
+  AccessLogs:
+    Type: AWS::Logs::LogGroup
+    DependsOn: ApiLoggingRole
+    Properties:
+      RetentionInDays: 30
+      LogGroupName: !Sub "/${AWS::StackName}/APIAccessLogs"
+
+Outputs:
+  UsersTable:
+    Description: DynamoDB Users table
+    Value: !Ref UsersTable
+
+  UsersFunction:
+    Description: "Lambda function used to perform actions on the users data"
+    Value: !Ref UsersFunction
+
+  APIEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
+  UserPool:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClient:
+    Description: Cognito User Pool Application Client ID
+    Value: !Ref UserPoolClient
+
+  UserPoolAdminGroupName:
+    Description: User Pool group name for API administrators
+    Value: !Ref UserPoolAdminGroupName
+    
+  CognitoLoginURL:
+    Description: Cognito User Pool Application Client Hosted Login UI URL
+    Value: !Sub 'https://${UserPoolClient}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&redirect_uri=http://localhost'
+
+  CognitoAuthCommand:
+    Description: AWS CLI command for Amazon Cognito User Pool authentication
+    Value: !Sub 'aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH --client-id ${UserPoolClient} --auth-parameters USERNAME=<username>,PASSWORD=<password>'
+
+```
+
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observability#deploy-checkpoint)
+
+### Deploy checkpoint
+
+Deploy the changes:
+
+```bash
+sam build && sam deploy
+```
+
+Generate some log entries:
+
+1.  Access the API endpoint or run the integration test
+    
+    ```bash
+    python -m pytest tests/integration -v
+    ```
+2. Navigate to [CloudWatch Log Groups in AWS Management Console](https://console.aws.amazon.com/cloudwatch/home?#logs:log-groups) You should see /ws-serverless-patterns-users/APIAccessLogs in the log groups:
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/log-group-streams.png)
+And you can look for app traces in the X-Ray traces option in the left navigation:
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/xray-traces.png)
+## Set Alarms
+
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/observe-alarm-sns-email.svg)
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observe-alarms#add-observability-alarms-resources)
+
+### Add observability - alarms resources
+
+Paste the following configuration with alarm resources into template.yaml:
+
+Expand for SAM template.yaml v7 - Alarms
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM Template for Serverless Patterns v7 - Observability - Alarms
+
+Globals:
+  Function:
+    Runtime: python3.9
+    MemorySize: 128
+    Timeout: 100
+    Tracing: Active
+
+Parameters:
+  UserPoolAdminGroupName:
+    Description: User pool group name for API administrators 
+    Type: String
+    Default: apiAdmins
+
+Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub  ${AWS::StackName}-Users
+      AttributeDefinitions:
+        - AttributeName: userid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/users.lambda_handler
+      Description: Handler for all users related operations
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+      Events:
+        GetUsersEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: get
+            RestApiId: !Ref RestAPI
+        PutUserEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: post
+            RestApiId: !Ref RestAPI
+        UpdateUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: put
+            RestApiId: !Ref RestAPI
+        GetUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: get
+            RestApiId: !Ref RestAPI
+        DeleteUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: delete
+            RestApiId: !Ref RestAPI
+
+  RestAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true
+      Tags:
+        Name: !Sub "${AWS::StackName}-API"
+        Stack: !Sub "${AWS::StackName}"
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - Authorization
+      AccessLogSetting:
+        DestinationArn: !GetAtt AccessLogs.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","routeKey":"$context.routeKey", "status":"$context.status","protocol":"$context.protocol", "integrationStatus": $context.integrationStatus, "integrationLatency": $context.integrationLatency, "responseLength":"$context.responseLength" }'
+      MethodSettings:
+        - ResourcePath: "/*"
+          LoggingLevel: INFO
+          HttpMethod: "*"
+          DataTraceEnabled: True
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties: 
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AdminCreateUserConfig: 
+        AllowAdminCreateUserOnly: false
+      AutoVerifiedAttributes: 
+        - email
+      Schema: 
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      UsernameAttributes: 
+        - email
+      UserPoolTags:
+          Key: Name
+          Value: !Sub ${AWS::StackName} User Pool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties: 
+      ClientName: 
+        !Sub ${AWS::StackName}UserPoolClient
+      ExplicitAuthFlows: 
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders: 
+        - COGNITO
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - 'code'
+      AllowedOAuthScopes:
+        - 'email'
+        - 'openid'
+      CallbackURLs:
+        - 'http://localhost' 
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      Domain: !Ref UserPoolClient
+      UserPoolId: !Ref UserPool
+
+  ApiAdministratorsUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: User group for API Administrators
+      GroupName: !Ref UserPoolAdminGroupName
+      Precedence: 0
+      UserPoolId: !Ref UserPool                 
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/authorizer.lambda_handler
+      Description: Handler for Lambda authorizer
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          APPLICATION_CLIENT_ID: !Ref UserPoolClient
+          ADMIN_GROUP_NAME: !Ref UserPoolAdminGroupName
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+
+  ApiLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccountLoggingSettings:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiLoggingRole.Arn
+
+  AccessLogs:
+    Type: AWS::Logs::LogGroup
+    DependsOn: ApiLoggingRole
+    Properties:
+      RetentionInDays: 30
+      LogGroupName: !Sub "/${AWS::StackName}/APIAccessLogs"
+
+  AlarmsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Tags:
+        - Key: "Stack" 
+          Value: !Sub "${AWS::StackName}"
+
+  RestAPIErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref RestAPI
+      EvaluationPeriods: 1
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  AuthorizerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuthorizerFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0      
+
+  AuthorizerFunctionThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuthorizerFunction
+      EvaluationPeriods: 1
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  UsersFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  UsersFunctionThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      EvaluationPeriods: 1
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+Outputs:
+  UsersTable:
+    Description: DynamoDB Users table
+    Value: !Ref UsersTable
+
+  UsersFunction:
+    Description: "Lambda function used to perform actions on the users data"
+    Value: !Ref UsersFunction
+
+  APIEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
+  UserPool:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClient:
+    Description: Cognito User Pool Application Client ID
+    Value: !Ref UserPoolClient
+
+  UserPoolAdminGroupName:
+    Description: User Pool group name for API administrators
+    Value: !Ref UserPoolAdminGroupName
+    
+  CognitoLoginURL:
+    Description: Cognito User Pool Application Client Hosted Login UI URL
+    Value: !Sub 'https://${UserPoolClient}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&redirect_uri=http://localhost'
+
+  CognitoAuthCommand:
+    Description: AWS CLI command for Amazon Cognito User Pool authentication
+    Value: !Sub 'aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH --client-id ${UserPoolClient} --auth-parameters USERNAME=<username>,PASSWORD=<password>'
+
+  AlarmsTopic:
+    Description: "SNS Topic to be used for the alarms subscriptions"
+    Value: !Ref AlarmsTopic
+
+
+```
+
+
+
+### Deploy Checkpoint
+
+To deploy the changes, run the following commands:
+
+```bash
+sam build && sam deploy
+```
+
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observe-alarms#subscribe-to-sns-topic-via-email)
+
+### Subscribe to SNS topic via email
+
+There are several ways to subscribe to alarms, but the easiest is with an **email** alert.
+
+1.  Go to the Simple Notification Service (SNS) Console
+2.  Go to the list of **Topics**
+3.  Select the previously created workshop topic.
+4.  In the Subscriptions tab, choose to create a subscription. Note: The ARN for your topic should be pre-populated. If not, search for it by name.
+5.  Select "Email" for the protocol and add your email address as the Endpoint.
+
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/sns-subscribe-to-topic.png)
+
+
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observe-alarms#trigger-some-alarms)
+
+#### Trigger some alarms
+
+**Option 1: add an error to the code!**
+
+In your Users Lambda function, mess something up, and deploy it! For example, change "lambda_handler" to "lambda_handlr" (missing 'e').
+
+Run the unit test suite. Tests should fail. Now, try to access the API. (It should also fail!) Check the logs.
+
+You should see the error in the logs. And, if you subscribed to the SNS queue, you should receive notification from SNS that your Lambda function failed.
+
+**Option 2: Force Lambda function throttling**
+
+Throttling is when your Lambda function is so busy that it cannot handle an additional request. You simulate this by setting the _reserved concurrency_ for the function to zero (0):
+
+```bash
+aws lambda put-function-concurrency \
+    --function-name  <UsersFunction name from the stack outputs>  \
+    --reserved-concurrent-executions 0
+```
+
+Again, try accessing the API (which should fail). And, if you subscribed to the SNS queue, you should receive notification from SNS that your Lambda function has been throttled.
+
+Do not forget to set the reserved concurrency back to a reasonable value, like 42, after testing!
+
+
+## Display a Dashboard
+![enter image description here](https://static.us-east-1.prod.workshops.aws/public/50ba7239-ade8-423c-9236-be127b9939d8/static/module2/cloudwatch-dash.png)[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observe-dash#add-observability-resources)
+
+### Add observability resources
+
+Paste the following into template.yaml to add an observability dashboard:
+
+Expand for SAM template.yaml v8 - Observability - Dashboard
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM Template for Serverless Patterns v8 - Observability - Dashboard
+
+Globals:
+  Function:
+    Runtime: python3.9
+    MemorySize: 128
+    Timeout: 100
+    Tracing: Active
+
+Parameters:
+  UserPoolAdminGroupName:
+    Description: User pool group name for API administrators 
+    Type: String
+    Default: apiAdmins
+
+Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub  ${AWS::StackName}-Users
+      AttributeDefinitions:
+        - AttributeName: userid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userid
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/users.lambda_handler
+      Description: Handler for all users related operations
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+      Events:
+        GetUsersEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: get
+            RestApiId: !Ref RestAPI
+        PutUserEvent:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: post
+            RestApiId: !Ref RestAPI
+        UpdateUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: put
+            RestApiId: !Ref RestAPI
+        GetUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: get
+            RestApiId: !Ref RestAPI
+        DeleteUserEvent:
+          Type: Api
+          Properties:
+            Path: /users/{userid}
+            Method: delete
+            RestApiId: !Ref RestAPI
+
+  RestAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      TracingEnabled: true
+      Tags:
+        Name: !Sub "${AWS::StackName}-API"
+        Stack: !Sub "${AWS::StackName}"
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - Authorization
+      AccessLogSetting:
+        DestinationArn: !GetAtt AccessLogs.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","routeKey":"$context.routeKey", "status":"$context.status","protocol":"$context.protocol", "integrationStatus": $context.integrationStatus, "integrationLatency": $context.integrationLatency, "responseLength":"$context.responseLength" }'
+      MethodSettings:
+        - ResourcePath: "/*"
+          LoggingLevel: INFO
+          HttpMethod: "*"
+          DataTraceEnabled: True
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties: 
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AdminCreateUserConfig: 
+        AllowAdminCreateUserOnly: false
+      AutoVerifiedAttributes: 
+        - email
+      Schema: 
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      UsernameAttributes: 
+        - email
+      UserPoolTags:
+          Key: Name
+          Value: !Sub ${AWS::StackName} User Pool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties: 
+      ClientName: 
+        !Sub ${AWS::StackName}UserPoolClient
+      ExplicitAuthFlows: 
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      SupportedIdentityProviders: 
+        - COGNITO
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - 'code'
+      AllowedOAuthScopes:
+        - 'email'
+        - 'openid'
+      CallbackURLs:
+        - 'http://localhost' 
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: 
+      Domain: !Ref UserPoolClient
+      UserPoolId: !Ref UserPool
+
+  ApiAdministratorsUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: User group for API Administrators
+      GroupName: !Ref UserPoolAdminGroupName
+      Precedence: 0
+      UserPoolId: !Ref UserPool                 
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/api/authorizer.lambda_handler
+      Description: Handler for Lambda authorizer
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          APPLICATION_CLIENT_ID: !Ref UserPoolClient
+          ADMIN_GROUP_NAME: !Ref UserPoolAdminGroupName
+      Tags:
+        Stack: !Sub "${AWS::StackName}"
+
+  ApiLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccountLoggingSettings:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiLoggingRole.Arn
+
+  AccessLogs:
+    Type: AWS::Logs::LogGroup
+    DependsOn: ApiLoggingRole
+    Properties:
+      RetentionInDays: 30
+      LogGroupName: !Sub "/${AWS::StackName}/APIAccessLogs"
+
+  AlarmsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Tags:
+        - Key: "Stack" 
+          Value: !Sub "${AWS::StackName}"
+
+  RestAPIErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref RestAPI
+      EvaluationPeriods: 1
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  AuthorizerFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuthorizerFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0      
+
+  AuthorizerFunctionThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuthorizerFunction
+      EvaluationPeriods: 1
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  UsersFunctionErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  UsersFunctionThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmsTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UsersFunction
+      EvaluationPeriods: 1
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 1.0
+
+  ApplicationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-dashboard"
+      DashboardBody:
+        Fn::Sub: >
+          {
+            "widgets": [
+                {
+                    "height": 6,
+                    "width": 6,
+                    "y": 6,
+                    "x": 0,
+                    "type": "metric",
+                    "properties": {
+                        "metrics": [
+                            [ "AWS/Lambda", "Invocations", "FunctionName", "${UsersFunction}" ],
+                            [ ".", "Errors", ".", "." ],
+                            [ ".", "Throttles", ".", "." ],
+                            [ ".", "Duration", ".", ".", { "stat": "Average" } ],
+                            [ ".", "ConcurrentExecutions", ".", ".", { "stat": "Maximum" } ]
+                        ],
+                        "view": "timeSeries",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "Users Lambda",
+                        "period": 60,
+                        "stat": "Sum"
+                    }
+                },
+                {
+                    "height": 6,
+                    "width": 6,
+                    "y": 6,
+                    "x": 6,
+                    "type": "metric",
+                    "properties": {
+                        "metrics": [
+                            [ "AWS/Lambda", "Invocations", "FunctionName", "${AuthorizerFunction}" ],
+                            [ ".", "Errors", ".", "." ],
+                            [ ".", "Throttles", ".", "." ],
+                            [ ".", "Duration", ".", ".", { "stat": "Average" } ],
+                            [ ".", "ConcurrentExecutions", ".", ".", { "stat": "Maximum" } ]
+                        ],
+                        "view": "timeSeries",
+                        "region": "${AWS::Region}",
+                        "stacked": false,
+                        "title": "Authorizer Lambda",
+                        "period": 60,
+                        "stat": "Sum"
+                    }
+                },
+                {
+                    "height": 6,
+                    "width": 12,
+                    "y": 0,
+                    "x": 0,
+                    "type": "metric",
+                    "properties": {
+                        "metrics": [
+                            [ "AWS/ApiGateway", "4XXError", "ApiName", "${AWS::StackName}", { "yAxis": "right" } ],
+                            [ ".", "5XXError", ".", ".", { "yAxis": "right" } ],
+                            [ ".", "DataProcessed", ".", ".", { "yAxis": "left" } ],
+                            [ ".", "Count", ".", ".", { "label": "Count", "yAxis": "right" } ],
+                            [ ".", "IntegrationLatency", ".", ".", { "stat": "Average" } ],
+                            [ ".", "Latency", ".", ".", { "stat": "Average" } ]
+                        ],
+                        "view": "timeSeries",
+                        "stacked": false,
+                        "region": "${AWS::Region}",
+                        "period": 60,
+                        "stat": "Sum",
+                        "title": "API Gateway"
+                    }
+                }
+            ]
+          }
+
+Outputs:
+  UsersTable:
+    Description: DynamoDB Users table
+    Value: !Ref UsersTable
+
+  UsersFunction:
+    Description: "Lambda function used to perform actions on the users data"
+    Value: !Ref UsersFunction
+
+  APIEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
+  UserPool:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClient:
+    Description: Cognito User Pool Application Client ID
+    Value: !Ref UserPoolClient
+
+  UserPoolAdminGroupName:
+    Description: User Pool group name for API administrators
+    Value: !Ref UserPoolAdminGroupName
+    
+  CognitoLoginURL:
+    Description: Cognito User Pool Application Client Hosted Login UI URL
+    Value: !Sub 'https://${UserPoolClient}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&redirect_uri=http://localhost'
+
+  CognitoAuthCommand:
+    Description: AWS CLI command for Amazon Cognito User Pool authentication
+    Value: !Sub 'aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH --client-id ${UserPoolClient} --auth-parameters USERNAME=<username>,PASSWORD=<password>'
+
+  AlarmsTopic:
+    Description: "SNS Topic to be used for the alarms subscriptions"
+    Value: !Ref AlarmsTopic
+
+  DashboardURL:
+    Description: "Dashboard URL"
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationDashboard}"
+
+```
+
+The resource type is a CloudWatch dashboard, with a layout and three widgets defined in a JSON array:
+
+1.  Widget #1 - API Gateway metrics
+    
+    Data fields include: 4XX and 5XX errors, number of requests, latency and integration latency, amount of data processed. We use two separate Y axis used by metrics for better visibility as their ranges of values differ. Note that ${RestAPI} is used in the definition to refer to the resource defined in the template.
+    
+2.  Widget #2 - Users Lambda function metrics
+    
+    Data fields include: number of invocations, errors, throttles, average invocation duration and maximum number of concurrent executions. Note that ${UsersFunction} is used in the definition to refer to the resource defined in the same template.
+    
+3.  Widget #3 - Authorizer Lambda function metrics
+    
+    Data fields include: number of invocations, errors, throttles, average invocation duration and maximum number of concurrent executions. Note ${AuthorizerFunction} used in the definition to refer to the resource defined in the same template.
+For easier access to the dashboard, an Output was added for the dashboard URL:
+
+```yaml
+  DashboardURL:
+    Description: "Dashboard URL"
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationDashboard}"
+```
+
+[](https://catalog.workshops.aws/serverless-patterns/en-US/module2/sam-python/observe-dash#deploy-checkpoint)
+
+### Deploy Checkpoint
+
+Deploy the dashboard with the now familiar commands:
+
+```bash
+sam build && sam deploy
+```
